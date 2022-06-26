@@ -1,0 +1,40 @@
+Todo HDP:
+
+1. Locally install these packages 
+
+
+.libPaths("/lustre/scratch119/humgen/projects/psoriasis/R_packages_farm5_R4.1.0_install/")
+
+package.check <- lapply(
+  packages,
+  FUN = function(x) {
+    if (!require(x, character.only = TRUE)) {
+      install.packages(x, dependencies = TRUE, lib="/lustre/scratch119/humgen/projects/psoriasis/R_packages_farm5_R4.1.0_install/")
+      library(x, character.only = TRUE)
+    }
+  }
+)
+
+packages = c("data.table", "dplyr", "BSgenome.Hsapiens.UCSC.hg38", "GenomicRanges", "Biostrings","RColorBrewer", "label.switching", "philentropy", "ggplot2", "GGally","here","farver")
+
+packages = c("label.switching", "philentropy",  "GGally","here","farver")
+
+library(data.table)
+library(dplyr)
+library(BSgenome.Hsapiens.UCSC.hg38)
+library(GenomicRanges)
+library(Biostrings)
+
+library(RColorBrewer)
+library(label.switching)
+library(philentropy)
+library(ggplot2)
+library(GGally)
+library(dplyr)
+library(data.table)
+library(here)
+library(farver)
+
+Run the context pull. 
+
+
