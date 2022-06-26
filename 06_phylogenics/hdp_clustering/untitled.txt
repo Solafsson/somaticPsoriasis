@@ -1,0 +1,37 @@
+NDP Clustering
+The .zip is the files that do the actual dirichlet mutational clustering (modified slightly from Stan and Simon’s code, but essentially the same).
+ 
+the dirichlet_setup.sh is for submitting it to the farm
+I’ve included the example input files for running the clustering.
+ 
+which needs the input directory (containing the alt, depth, and mutation context files)
+output dir
+sample name (prefix at the start of the alt/depth files)
+and the number of burnin cycles (I use 15,000)
+ 
+the context_pull.R will generate the mutational contexts in GRCh38 for doing some plotting. it just needs as input a tab-delimitted file with chr, pos, ref, alt
+ 
+you would run the context_pull first, then submit the dirichlet run to the farm.
+ 
+Pigeon Holes
+For the pigeonhole plotting here is the gitlab page containing the code:
+https://gitlab.internal.sanger.ac.uk/tb14/breast-ndp-tree-building
+ 
+Please let me know if you think of anything that can be improved in the presentation of the page.
+ 
+Interactive plots
+And finally here is the gitlab for the interactive mapscape plots I have been making, this is still a bit of a work in progress.:
+https://gitlab.internal.sanger.ac.uk/tb14/mapscape-generator
+ 
+Let me know if you run into any issues.
+ 
+Best,
+Tim
+
+
+
+
+while read patient; do
+mkdir pdfs/${patient}
+cp ${patient}/ndp_${patient}_2021_12_09/Cluster_and_spectrum_plots.pdf pdfs/${patient}/
+done < patientList_hdp.tmp

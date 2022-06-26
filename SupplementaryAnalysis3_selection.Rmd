@@ -1,0 +1,306 @@
+---
+title: "Somatic mutations in psoriasis - Selection analyses"
+author: "Sigurgeir Olafsson"
+date: "2/17/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE} 
+knitr::opts_chunk$set(warning = FALSE, message = FALSE, echo=TRUE) 
+```
+
+## Introduction
+
+This document describes the selection analyses carried out as part of the manuscript "Effects of psoriasis and phototreatment on the somatic mutation landscape of the skin" by Sigurgeir Ólafsson et al. 
+
+For selection analyses, we used the dNdScv software. Please see
+<https://doi.org/10.1016/j.cell.2017.09.042> and 
+<https://github.com/im3sanger/dndscv>
+
+The analyses use mutation calls provided in a supplementary table of the manuscript. The raw sequencing data has been made publicly available, please see the manuscript for details. 
+
+```{r message=FALSE, warning=FALSE}
+.libPaths("/lustre/scratch119/humgen/projects/psoriasis/R_packages_farm5_R4.1.0_install/")
+
+library("seqinr")
+library("Biostrings")
+library("MASS")
+library("GenomicRanges")
+library("dndscv")
+```
+
+
+```{r}
+all_mutations <- read.table("/nfs/users/nfs_s/so11/phd/psoriasis/bsub_jupyter_lab/psoriasis/manuscript_data_and_figures/Supplementary_Table4_all_mutations.txt", h=T)
+head(all_mutations)
+table(all_mutations$type)
+
+```
+
+## Exome wide test for selection on the gene-level
+
+I will first conduct an unbiased test for positive selection on the level of individual genes. 
+dNdScv does not annotate double-base mutations (DBSs) but lumps them together with indels under a "no-SNV" mutation class. Many datasets have few DBS mutations so this is not a big issue. As DBS mutations commonly occur as a result of UV-exposure, the current dataset has many such mutations and these need to be accounted for in the modeling. 
+
+DBS mutations are much more numerous than indels. I will run a separate negative binomial model for each mutation class. This involves running dNdScv twice, once excluding indels and once excluding DBS mutations. The results for single-base substitutions (SBSs) are unaffected. The P-values from each model can then be combined using Fisher's method. 
+
+```{r}
+## Format the data a little
+all_mutations$Chr <- gsub("chr", "", all_mutations$Chr)
+dbs_only <- all_mutations[all_mutations$type!="Indel",c("MicrobiopsyID", "Chr", "Pos_hg38", "Ref", "Alt")]
+indel_only <- all_mutations[all_mutations$type!="DBS",c("MicrobiopsyID", "Chr", "Pos_hg38", "Ref", "Alt")]
+colnames(dbs_only) = colnames(indel_only) = c("SampleID", "Chr", "Pos", "Ref", "Alt")
+
+## Read in the covariates for dNdScv
+covs = "/lustre/scratch119/humgen/projects/psoriasis/resources/covariates_20pc_GRCh37-38.altogether_withoutepiout.Rdat"
+load(covs) # it loads an object called scores
+
+refcds_38 = "/lustre/scratch119/humgen/projects/psoriasis/resources/refcds_GRCh38-GencodeV18+Appris.rda"
+```
+
+There are a few samples that truly have a very high mutation burden. I will overwrite the default parameters for `max_muts_per_gene_per_sample` and `max_coding_muts_per_sample` to include all mutations. Below, I show that the inclusion of hypermutators does not affect the results.
+
+
+```{r message=FALSE}
+d38_dbs_only = dndscv(dbs_only, refdb=refcds_38, cv=scores,max_muts_per_gene_per_sample = Inf, max_coding_muts_per_sample = Inf) 
+d38_indel_only = dndscv(indel_only, refdb=refcds_38, cv=scores,max_muts_per_gene_per_sample = Inf, max_coding_muts_per_sample = Inf) 
+
+
+sel_cv_dbs = d38_dbs_only$sel_cv
+sel_cv_indel = d38_indel_only$sel_cv
+# Results are sorted by significance - sort the dataframes in the same way:
+sel_cv_indel = sel_cv_indel[order(sel_cv_indel$gene_name),]
+sel_cv_dbs = sel_cv_dbs[order(sel_cv_dbs$gene_name),]
+
+# Fisher combined p-values (single base substitutions, double base substitutions and indels)
+p_global <- 1-pchisq(-2 * (log(sel_cv_indel$pallsubs_cv) + log(sel_cv_indel$pind_cv) + log(sel_cv_dbs$pind_cv)), df = 6)
+q_global <- p.adjust(p_global, method="BH")
+
+sel_cv_indel$pdbs_cv <- sel_cv_dbs$pind_cv
+sel_cv_indel$wdbs_cv <- sel_cv_dbs$wind_cv
+sel_cv_indel$pglobal_cv <- p_global
+sel_cv_indel$qglobal_cv <- q_global
+sel_cv_indel$n_dbs <- sel_cv_dbs$n_ind
+
+sel_cv_indel = sel_cv_indel[order(sel_cv_indel$pglobal_cv, sel_cv_indel$pallsubs_cv, sel_cv_indel$pmis_cv, sel_cv_indel$ptrunc_cv, -sel_cv_indel$wmis_cv),] # Sorting genes in the output file
+
+signif_genes <- sel_cv_indel[sel_cv_indel$qglobal_cv < 0.05,]
+signif_genes
+
+```
+
+```{r message=FALSE}
+# No need to re-write the file every time the document is knitted.
+#write.table(sel_cv_indel, file="/nfs/users/nfs_s/so11/phd/psoriasis/bsub_jupyter_lab/psoriasis/manuscript_data_and_figures/sel_cv_dNdS_results.txt", sep="\t", quote=F, row.names = F)
+```
+
+### Test the effect of excluding the covariates
+
+It's worth checking what effect the covariates have on the above analysis. This is done simply by setting the cv parameter to NULL in dndscv(). The covariates have been extensively tested in TCGA and they generally give superior results. I report the selection analysis *with* covariates in the paper.  
+
+```{r message=FALSE}
+dbs_noCov = dndscv(dbs_only, refdb=refcds_38, cv=NULL,max_muts_per_gene_per_sample = Inf, max_coding_muts_per_sample = Inf) 
+indel_noCov = dndscv(indel_only, refdb=refcds_38, cv=NULL,max_muts_per_gene_per_sample = Inf, max_coding_muts_per_sample = Inf) 
+
+sel_cv_dbs_noCov = dbs_noCov$sel_cv
+sel_cv_indel_noCov = indel_noCov$sel_cv
+# Sort the dataframes in the same way
+sel_cv_indel_noCov = sel_cv_indel_noCov[order(sel_cv_indel_noCov$gene_name),]
+sel_cv_dbs_noCov = sel_cv_dbs_noCov[order(sel_cv_dbs_noCov$gene_name),]
+
+p_global <- 1-pchisq(-2 * (log(sel_cv_indel_noCov$pallsubs_cv) + log(sel_cv_indel_noCov$pind_cv) + log(sel_cv_dbs_noCov$pind_cv)), df = 6)
+q_global <- p.adjust(p_global, method="BH")
+
+sel_cv_indel_noCov$pdbs_cv <- sel_cv_dbs_noCov$pind_cv
+sel_cv_indel_noCov$wdbs_cv <- sel_cv_dbs_noCov$wind_cv
+sel_cv_indel_noCov$pglobal_cv <- p_global
+sel_cv_indel_noCov$qglobal_cv <- q_global
+sel_cv_indel_noCov$n_dbs <- sel_cv_dbs_noCov$n_ind
+
+sel_cv_indel_noCov = sel_cv_indel_noCov[order(sel_cv_indel_noCov$pglobal_cv, sel_cv_indel_noCov$pallsubs_cv, sel_cv_indel_noCov$pmis_cv, sel_cv_indel_noCov$ptrunc_cv, -sel_cv_indel_noCov$wmis_cv),] # Sorting genes in the output file
+
+signif_genes_noCov <- sel_cv_indel_noCov[sel_cv_indel_noCov$qglobal_cv < 0.05,]
+# Print out genes that are significant in either analysis.
+sel_cv_indel_noCov[sel_cv_indel_noCov$gene_name %in% unique(c(signif_genes$gene_name),signif_genes_noCov$gene_name),]
+
+```
+
+### Test the effect of hypermutators
+
+Hypermutators can have an effect on selection analyses as they contribute many passengers but relatively few drivers. I want to test the effect of excluding hypermutators. This involves doing two things: First, remove the samples from P34H, which have an incredibly high mutation burden. Second, account for other possible hypermutators by using the default settings for max_muts_per_gene and sample. 
+
+```{r message=FALSE}
+
+dbs_noHype <- dbs_only[grep("P34H", dbs_only$SampleID, invert=T),]
+indel_noHype <- indel_only[grep("P34H", indel_only$SampleID, invert=T),]
+
+dbs_hype = dndscv(dbs_noHype, refdb=refcds_38, cv=scores) 
+indel_hype = dndscv(indel_noHype, refdb=refcds_38, cv=scores) 
+
+sel_cv_dbs_hype = dbs_hype$sel_cv
+sel_cv_indel_hype = indel_hype$sel_cv
+
+sel_cv_indel_hype = sel_cv_indel_hype[order(sel_cv_indel_hype$gene_name),]
+sel_cv_dbs_hype = sel_cv_dbs_hype[order(sel_cv_dbs_hype$gene_name),]
+
+p_global <- 1-pchisq(-2 * (log(sel_cv_indel_hype$pallsubs_cv) + log(sel_cv_indel_hype$pind_cv) + log(sel_cv_dbs_hype$pind_cv)), df = 6)
+q_global <- p.adjust(p_global, method="BH")
+
+sel_cv_indel_hype$pdbs_cv <- sel_cv_dbs_hype$pind_cv
+sel_cv_indel_hype$wdbs_cv <- sel_cv_dbs_hype$wind_cv
+sel_cv_indel_hype$pglobal_cv <- p_global
+sel_cv_indel_hype$qglobal_cv <- q_global
+sel_cv_indel_hype$n_dbs <- sel_cv_dbs_hype$n_ind
+
+sel_cv_indel_hype = sel_cv_indel_hype[order(sel_cv_indel_hype$pglobal_cv, sel_cv_indel_hype$pallsubs_cv, sel_cv_indel_hype$pmis_cv, sel_cv_indel_hype$ptrunc_cv, -sel_cv_indel_hype$wmis_cv),] # Sorting genes in the output file
+
+# Print out genes that are significant in either analysis.
+signif_genes_hype <- sel_cv_indel_hype[sel_cv_indel_hype$qglobal_cv<0.05,]
+sel_cv_indel_hype[sel_cv_indel_hype$gene_name %in% unique(c(signif_genes$gene_name),signif_genes_hype$gene_name),]
+
+```
+
+### Restricting the analysis to lesional skin
+
+We may wonder if pooling samples from lesional and non-lesional skin impacts the analysis. The following analysis shows that no recurrently mutated genes are missed by pooling samples but as the sample size is smaller and there are fewer mutations, some genes no longer reach significance. 
+
+```{r message=FALSE}
+
+dbs_lesional <- dbs_only[!grepl("H", dbs_only$SampleID),]
+d38_dbs_lesional = dndscv(dbs_lesional, refdb=refcds_38, cv=scores,max_muts_per_gene_per_sample = Inf, max_coding_muts_per_sample = Inf) 
+sel_cv_dbs = d38_dbs_lesional$sel_cv
+
+indel_lesional <- indel_only[!grepl("H", indel_only$SampleID),]
+d38_indel_lesional = dndscv(indel_lesional, refdb=refcds_38, cv=scores,max_muts_per_gene_per_sample = Inf, max_coding_muts_per_sample = Inf) 
+sel_cv_indel_lesional = d38_indel_lesional$sel_cv
+
+
+sel_cv_indel_lesional = sel_cv_indel_lesional[order(sel_cv_indel_lesional$gene_name),]
+sel_cv_dbs = sel_cv_dbs[order(sel_cv_dbs$gene_name),]
+
+p_global <- 1-pchisq(-2 * (log(sel_cv_indel_lesional$pallsubs_cv) + log(sel_cv_indel_lesional$pind_cv) + log(sel_cv_dbs$pind_cv)), df = 6)
+q_global <- p.adjust(p_global, method="BH")
+
+sel_cv_indel_lesional$pdbs_cv <- sel_cv_dbs$pind_cv
+sel_cv_indel_lesional$wdbs_cv <- sel_cv_dbs$wind_cv
+sel_cv_indel_lesional$pglobal_cv <- p_global
+sel_cv_indel_lesional$qglobal_cv <- q_global
+sel_cv_indel_lesional$n_dbs <- sel_cv_dbs$n_ind
+
+sel_cv_indel_lesional = sel_cv_indel_lesional[order(sel_cv_indel_lesional$pglobal_cv, sel_cv_indel_lesional$pallsubs_cv, sel_cv_indel_lesional$pmis_cv, sel_cv_indel_lesional$ptrunc_cv, -sel_cv_indel_lesional$wmis_cv),] # Sorting genes in the output file
+
+signif_genes_lesional <- sel_cv_indel_lesional[sel_cv_indel_lesional$qglobal_cv < 0.05,]
+
+sel_cv_indel_lesional[sel_cv_indel_lesional$gene_name %in% unique(c(signif_genes$gene_name),signif_genes_lesional$gene_name),]           
+```
+
+### Restricting the analysis to non-lesional skin
+
+We find positive selection in a few genes that have not been previously reported for normal skin. The question we want to answer is if there is evidence for mutations in these genes being positively selected in non-lesional skin. If there is then that is evidence that these mutations have little to do with psoriasis itself. 
+
+```{r message=FALSE}
+
+dbs_nonLes <- dbs_only[grepl("H", dbs_only$SampleID),]
+d38_dbs_nonLes = dndscv(dbs_nonLes, refdb=refcds_38, cv=scores,max_muts_per_gene_per_sample = Inf, max_coding_muts_per_sample = Inf) 
+sel_cv_dbs = d38_dbs_nonLes$sel_cv
+
+indel_nonLes <- indel_only[grepl("H", indel_only$SampleID),]
+d38_indel_nonLes = dndscv(indel_nonLes, refdb=refcds_38, cv=scores,max_muts_per_gene_per_sample = Inf, max_coding_muts_per_sample = Inf) 
+sel_cv_indel_nonLes = d38_indel_nonLes$sel_cv
+
+
+sel_cv_indel_nonLes = sel_cv_indel_nonLes[order(sel_cv_indel_nonLes$gene_name),]
+sel_cv_dbs = sel_cv_dbs[order(sel_cv_dbs$gene_name),]
+
+p_global <- 1-pchisq(-2 * (log(sel_cv_indel_nonLes$pallsubs_cv) + log(sel_cv_indel_nonLes$pind_cv) + log(sel_cv_dbs$pind_cv)), df = 6)
+q_global <- p.adjust(p_global, method="BH")
+
+sel_cv_indel_nonLes$pdbs_cv <- sel_cv_dbs$pind_cv
+sel_cv_indel_nonLes$wdbs_cv <- sel_cv_dbs$wind_cv
+sel_cv_indel_nonLes$pglobal_cv <- p_global
+sel_cv_indel_nonLes$qglobal_cv <- q_global
+sel_cv_indel_nonLes$n_dbs <- sel_cv_dbs$n_ind
+
+sel_cv_indel_nonLes = sel_cv_indel_nonLes[order(sel_cv_indel_nonLes$pglobal_cv, sel_cv_indel_nonLes$pallsubs_cv, sel_cv_indel_nonLes$pmis_cv, sel_cv_indel_nonLes$ptrunc_cv, -sel_cv_indel_nonLes$wmis_cv),] # Sorting genes in the output file
+
+signif_genes_nonLes <- sel_cv_indel_nonLes[sel_cv_indel_nonLes$qglobal_cv < 0.05,]
+
+sel_cv_indel_nonLes[sel_cv_indel_nonLes$gene_name %in% c("CHEK2", "GXYLT1", "ZFP36L2", "EEF1A1"),]          
+```
+
+## Restricted hypothesis testing 
+
+Not all genes are equally likely to be under positive selection in the skin. The above analysis assumes we know nothing of what to expect, but in reality we do. Past studies of skin and oesophagous have identified a number of recurrently mutated genes and we may be interested in seeing if there is evidence of positive selection of mutations in those genes in the current dataset. 
+
+I have compiled a list of genes from Fowler et a. <https://doi.org/10.1158/2159-8290.CD-20-1092>, Martincorena et al <https://doi.org/10.1126/science.aau3879> and Yokoyama et al <https://doi.org/10.1038/s41586-018-0811-x>. 
+
+
+The restricted hypothesis testing basically just involves only changing the q-values to reflect less multiple testing. Even in with much reduced burden of multiple testing, no evidence for selection in these genes is found.
+
+```{r message=FALSE}
+rht_genes <- read.table("/nfs/users/nfs_s/so11/phd/psoriasis/bsub_jupyter_lab/psoriasis/08_selection_analyses/rht_genes.txt")
+
+sel_cv_rht <- sel_cv_indel[sel_cv_indel$gene_name %in% rht_genes$V1, ]
+sel_cv_rht$qrht <- p.adjust(sel_cv_rht$pglobal_cv, method = "BH")
+sel_cv_rht <- sel_cv_rht[order(sel_cv_rht$qrht),]
+sel_cv_rht
+
+```
+
+## Site- dN/dS
+I want to run site-wise dN/dS to identify mutation hotspots that may be found in genes that do not reach significance on the gene level. The following analysis shows that only NOTCH1 E455K reaches significance. 
+
+```{r message=FALSE}
+
+d38_sites = dndscv(dbs_only, refdb=refcds_38, cv=scores,max_muts_per_gene_per_sample = Inf, max_coding_muts_per_sample = Inf, outmats=T)
+sites=sitednds(d38_sites)
+head(sites$recursites)
+
+```
+
+## Pathway-level dN/dS
+
+In our recent manuscript "Somatic evolution in non-neoplastic IBD-affected colon" <https://doi.org/10.1016/j.cell.2020.06.036>, we found that genes in the IL-17 and TLR pathways were enriched in somatic mutations in the colonic mucosa, even though no individual genes reached significance. We are interested in seeing if we can see evidence of positive selection on the pathway-level. 
+
+
+The mutation spectra for both UV-light and psoralen exposure extend beyond the trinucleotide model. This doesn't make too much of a difference on a gene level but it makes sense to implement a pentanucleotide model when considering genes in aggregate. 
+
+Please see the R-script pathway_dnds_pentanuc_model.r for details on how this was done. The script can be found in the Github repository accompanying this manuscript (see main text). 
+
+
+```{r message=FALSE}
+geneLists <- read.table("/lustre/scratch119/humgen/projects/psoriasis/selection_analyses/pathway_dNdS_geneLists.txt")
+
+df <- data.frame()
+for(geneL in geneLists$V1) {
+  results <- read.table(paste("/lustre/scratch119/humgen/projects/psoriasis/selection_analyses/pathway_pentamodel/", geneL, "_Full3075_1x2w_model_dNdSvals.txt", sep=""),h=T)
+  results$pathway <- geneL
+  df <- rbind(df, results)
+}
+
+df <- df[df$omega %in% c("wmis_driv", "wnon_driv"),]
+df <- df[df$omega!="r_drivpass",]
+df$q <- p.adjust(df$P, method="BH")
+df
+```
+
+## Effects of Psoralen exposure
+
+There is some [literature](https://www.cell.com/cell-stem-cell/pdfExtended/S1934-5909(18)30402-8) out there to suggest that the selection of TP53 in particular is affected by UV-light exposure. We find no evidence that TP53 or any other gene is particulary selected for in the Psoralen-exposed skin. Please remember that the absence of evidence is not evidence of absence and we may simply lack power to detect differences in selection between psoralen-exposed and non-exposed skin. 
+
+```{r message=FALSE}
+
+cluster_burden <- read.table("/nfs/users/nfs_s/so11/phd/psoriasis/bsub_jupyter_lab/psoriasis/manuscript_data_and_figures/Supplementary_material/Supplementary_Table3_clone_mutationBurden.txt", h=T)
+
+## Mutations in samples with high PUVA exposure
+puva_muts <- all_mutations[all_mutations$ClusterID %in% cluster_burden$CloneID[cluster_burden$PUVA>100],c("MicrobiopsyID", "Chr", "Pos_hg38", "Ref", "Alt")]
+
+colnames(puva_muts) = c("SampleID", "Chr", "Pos", "Ref", "Alt")
+
+puva_dnds = dndscv(puva_muts, refdb=refcds_38, cv=scores,max_muts_per_gene_per_sample = Inf, max_coding_muts_per_sample = Inf) 
+
+sel_cv_puva <- puva_dnds$sel_cv
+sel_cv_puva[sel_cv_puva$gene_name=="TP53",]
+sel_cv_indel[sel_cv_indel$gene_name=="TP53",]
+```
+
