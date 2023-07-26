@@ -1,0 +1,257 @@
+---
+title: "CodeS2: Burden and signature analyses"
+author: "Sigurgeir Ólafsson"
+date: "2/20/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE} 
+knitr::opts_chunk$set(warning = FALSE, message = FALSE, echo=TRUE) 
+```
+
+## Introduction
+
+This document describes the clonality and burden analyses carried out as part of our manuscript "Effects of psoriasis and psoralen exposure on the somatic mutation landscape of the skin" by Sigurgeir Ólafsson et al. 
+
+This analysis uses pre-calculated summary statistics provided as supplementary tables. The mutation calls can be accessed from a Mendeley-Data repository that accompanies the manuscript and the raw sequencing data has also been made publicly available, please see the manuscript for details. 
+
+```{r}
+.libPaths("/lustre/scratch126/humgen/projects/psoriasis/R_packages_farm5_R4.1.0_install/")
+
+library(ggplot2)
+library(reshape2)
+library(cowplot)
+library(ggsignif)
+library(nlme)
+
+## DEFINE PLOTTING VARIABLES
+#############################
+BASESIZE=14
+
+# Location colour vector
+#Abdomen     Arm    Back   Flank     Leg
+loc_colors <- c("#264653", "#2A9D8F","#E9C46A","#F4A261","#E76F51")
+
+# Disease type (lesional vs non-lesional) colour vector
+type_colours <- c("#FF7075", "#5DB4EA")
+
+## Read in the meta-data
+#############################
+
+working_dir="/nfs/users/nfs_s/so11/phd/psoriasis/bsub_jupyter_lab/psoriasis/manuscript_data_and_figures/Supplementary_material/"
+
+microd_meta <- read.table(paste(working_dir, "Supplementary_Table2_microdissection_metadata.txt", sep=""), h=T)
+patient_meta <- read.table(paste(working_dir, "Supplementary_Table1_patient_metadata.txt", sep=""), h=T)
+
+biopsy_meta <- unique(microd_meta[microd_meta$ExclusionCriteria=="PASS",c("BiopsyID", "MetaLocation", "DiseaseStatus")])
+table(biopsy_meta$MetaLocation, biopsy_meta$DiseaseStatus, useNA="always")
+table(microd_meta$MetaLocation[microd_meta$ExclusionCriteria=="PASS"], microd_meta$DiseaseStatus[microd_meta$ExclusionCriteria=="PASS"], useNA="always")
+table(patient_meta$Sex)
+```
+
+## Clonality analysis
+
+First compare the median variant allele frequencies (VAFs) of microbiopsies derrived from lesional and non-lesional skin. We see that they are near identical. Most somatic mutations are heterozygous, so in a fully clonal sample we would expect the median VAF to be 0.5. Most microbiopsies are a mix of clones and have median VAFs lower than 0.5.
+
+```{r echo = FALSE}
+ggplot(microd_meta, aes(x=MedianVAF, fill=DiseaseStatus)) + geom_histogram(position="dodge") + 
+  scale_y_continuous(expand = c(0, 0)) + theme_classic(base_size = BASESIZE) +
+  scale_fill_manual(values=type_colours) + labs(x="Median VAF of microbiopsy",y="# Microbiopsies") +
+  theme(legend.title = element_blank(), legend.position = "top") +
+  geom_vline(xintercept=median(microd_meta$MedianVAF[microd_meta$DiseaseStatus=="Lesional"],na.rm=T), size=1,colour="#E00007", linetype="dashed") + 
+  geom_vline(xintercept=median(microd_meta$MedianVAF[microd_meta$DiseaseStatus=="Non-lesional"],na.rm=T), size=1,colour="#156CA2", linetype="dashed")
+```
+
+## Mutation burden analyses
+
+Since the microbiopsies tend to be a mix of cell clones, they don't give a good estimate of the per-cell mutation burden. Instead, I have computationally grouped mutations by their VAF into clusters. I have then used the pigeonhole principle to construct phylogenetic trees from the clusters. The mutation burden analyses are done on the level of the tips of the phylogenetic trees, which I refer to here as clones. 
+
+I have extracted mutational signatures for each cluster and computed the total mutation burden and the burden of each individual signature in each clone by summing accross the clusters. The scripts for doing each individual step are available on the Github page accompanying the manuscript but the below analyses will simply read in the results. 
+
+```{r}
+clone_burden <- read.table(paste(working_dir, "Supplementary_Table3_clone_mutationBurden.txt", sep=""), h=T)
+clone_burden <- merge(clone_burden, microd_meta[,c("SampleID", "BiopsyID", "MetaLocation","PatientID", "DiseaseStatus")], by.x="HighCellFrac_sample", by.y="SampleID")
+clone_burden <- merge(clone_burden, patient_meta[,c("Patient.ID", "Age_at_sampling", "Disease_duration","Sex")], by.x="PatientID", by.y="Patient.ID")
+
+clone_burden$Disease_duration[clone_burden$DiseaseStatus=="Non-lesional" & !is.na(clone_burden$Disease_duration)] <- 0
+
+```
+
+
+### Total mutation burden
+
+We can first look at the total mutation burden as a function of age. Fit a linear mixed effects model with a fixed effects for age and the anatomical location of the sample and random effects for patient and for biopsy (nested within that of patient). Then add a fixed effect for disease duration (set to 0 for non-lesional samples, see above) and test if the fit of the model is improved using a likelihood ratio test. 
+
+```{r}
+model_null.lme <- lme(fixed = TotalSBS_adj ~ Age_at_sampling  + MetaLocation, 
+                      random = list(PatientID = pdSymm(form = ~ Age_at_sampling - 1), BiopsyID = pdSymm(form = ~ Age_at_sampling - 1)), 
+                      weights = varIdent(form= ~ 1 | DiseaseStatus),
+                      data = clone_burden[!is.na(clone_burden$Disease_duration),], method="ML")
+
+model_dur.lme <- lme(fixed = TotalSBS_adj ~ Age_at_sampling  + MetaLocation + Disease_duration, 
+                      random = list(PatientID = pdSymm(form = ~ Age_at_sampling - 1), BiopsyID = pdSymm(form = ~ Age_at_sampling - 1)), 
+                      weights = varIdent(form= ~ 1 | DiseaseStatus),
+                      data = clone_burden[!is.na(clone_burden$Disease_duration),], method="ML")
+
+summary(model_null.lme)
+summary(model_dur.lme)
+anova(model_null.lme,model_dur.lme, test=T)$"p-value"[2]
+lme.ints <- intervals(model_null.lme, which="fixed")$fixed
+lme.ints
+```
+We can plot the mutation burden as a function of the age of the patient. We note that there are huge outliers in the data. These are driven by a few clones having very high burden of the psoralen signature. The burden of the psoralen signature is not expected to increase linearly with age and so we wish to remove those mutations before proceeding further. 
+
+```{r, fig.height=10, fig.width=10}
+maxAge=max(clone_burden$Age_at_sampling)
+ageEff=lme.ints["Age_at_sampling", "est."]
+low <-lme.ints["Age_at_sampling", "lower"] 
+upp <- lme.ints["Age_at_sampling", "upper"] 
+
+ggplot(clone_burden, aes(y=TotalSBS_adj, x=Age_at_sampling, fill=DiseaseStatus)) + geom_point( colour="black", shape=21) + 
+  scale_fill_manual(values=type_colours)  + 
+  labs(y="Total SBS", x="Age at sample donation") +
+  theme_classic() + theme(legend.title = element_blank(), legend.position = "top") +
+  geom_ribbon(aes(ymin=Age_at_sampling*low, ymax=Age_at_sampling*upp, x=Age_at_sampling), alpha = 0.3, show.legend=F) +
+  geom_line(aes(y=Age_at_sampling*ageEff, x=Age_at_sampling)) + 
+  guides(fill = guide_legend(override.aes = list(size=2.5)))
+
+```
+### Total burden excluding Psoralen
+
+The model above is affected by outlier samples which have a high burden of mutations attributed to the Psoralen signature. We'll get a more representative estimate of the rate at which mutations accumulate in the skin by excluding these. 
+
+There is still no significant effect of disease duration however. 
+
+```{r}
+clone_burden$noPUVA <- clone_burden$TotalSBS_adj - clone_burden$PUVA
+
+model_noPUVA.null <- lme(fixed = noPUVA ~ Age_at_sampling  + MetaLocation, 
+                      random = list(PatientID = pdSymm(form = ~ Age_at_sampling - 1), BiopsyID = pdSymm(form = ~ Age_at_sampling - 1)), 
+                      weights = varIdent(form= ~ 1 | DiseaseStatus),
+                      data = clone_burden[!is.na(clone_burden$Disease_duration),], method="ML")
+
+model_noPUVA.dur <- lme(fixed = noPUVA ~ Age_at_sampling  + MetaLocation + Disease_duration, 
+                      random = list(PatientID = pdSymm(form = ~ Age_at_sampling - 1), BiopsyID = pdSymm(form = ~ Age_at_sampling - 1)), 
+                      weights = varIdent(form= ~ 1 | DiseaseStatus),
+                      data = clone_burden[!is.na(clone_burden$Disease_duration),], method="ML")
+
+summary(model_noPUVA.null)
+noPUVA.ints <- intervals(model_noPUVA.null, which="fixed")$fixed
+noPUVA.ints
+
+summary(model_noPUVA.dur)
+intervals(model_noPUVA.dur, which="fixed")$fixed
+anova(model_noPUVA.null,model_noPUVA.dur, test=T)$"p-value"[2]
+
+```
+
+
+### UV-associated mutation burden
+
+UV-light is the dominant mutagen in the skin, accounting for 80% of the mutations in this dataset (and even more if PUVA isn't considered). We may be interested in knowing the rate at which UV-associated mutations accumulate in the skin. Fit the model using only the mutation burden attributed to UV-related signatures. 
+
+
+```{r}
+clone_burden$UV <- clone_burden$SBS7b + clone_burden$SBS7c
+model_UV.null <- lme(fixed = UV ~ Age_at_sampling  + MetaLocation, 
+                      random = list(PatientID = pdSymm(form = ~ Age_at_sampling - 1), BiopsyID = pdSymm(form = ~ Age_at_sampling - 1)), 
+                      weights = varIdent(form= ~ 1 | DiseaseStatus),
+                      data = clone_burden[!is.na(clone_burden$Disease_duration),], method="ML")
+
+model_UV.dur <- lme(fixed = UV ~ Age_at_sampling  + MetaLocation + Disease_duration, 
+                      random = list(PatientID = pdSymm(form = ~ Age_at_sampling - 1), BiopsyID = pdSymm(form = ~ Age_at_sampling - 1)), 
+                      weights = varIdent(form= ~ 1 | DiseaseStatus),
+                      data = clone_burden[!is.na(clone_burden$Disease_duration),], method="ML")
+
+summary(model_UV.null)
+summary(model_UV.dur)
+anova(model_UV.null,model_UV.dur, test=T)$"p-value"[2]
+UV.ints <- intervals(model_UV.null, which="fixed")$fixed
+UV.ints
+```
+Again there is no significant effect of disease duration in this model.
+
+### SBS1/5 - associated mutation burden
+
+The mutational signatures SBS1 and SBS5 are found in all normal cells at varying frequencies. They accumulate linearly with age but are accelerated in some inflamed tissues, including colonic mucosa affected by inflammatory bowel disease (see <https://doi.org/10.1016/j.cell.2020.06.036>). UV-exposure adds a lot of variance to the dataset and may mask any potential effects of psoriasis on the mutation burden. We should test if there is an effect of disease duration on the SBS1/5 mutation burden. 
+
+
+```{r}
+
+model_clock.null <- lme(fixed = SBS1.5 ~ Age_at_sampling  + MetaLocation, 
+                      random = list(PatientID = pdSymm(form = ~ Age_at_sampling - 1), BiopsyID = pdSymm(form = ~ Age_at_sampling - 1)), 
+                      weights = varIdent(form= ~ 1 | DiseaseStatus),
+                      data = clone_burden[!is.na(clone_burden$Disease_duration),], method="ML")
+
+model_clock.dur <- lme(fixed = SBS1.5 ~ Age_at_sampling  + MetaLocation + Disease_duration, 
+                      random = list(PatientID = pdSymm(form = ~ Age_at_sampling - 1), BiopsyID = pdSymm(form = ~ Age_at_sampling - 1)), 
+                      weights = varIdent(form= ~ 1 | DiseaseStatus),
+                      data = clone_burden[!is.na(clone_burden$Disease_duration),], method="ML")
+
+summary(model_clock.null)
+summary(model_clock.dur)
+anova(model_clock.null,model_clock.dur, test=T)$"p-value"[2]
+clock.ints <- intervals(model_clock.dur, which="fixed")$fixed
+clock.ints
+summary(model_clock.dur)$tTable[,"p-value"]
+```
+When restricting to the mutation burden attributed to SBS1/5, the disease duration effect is (borderline) significant. 
+
+### Pruning the phylogenetic trees
+
+Some of the mutation clusters consisted of groups of mutations with VAFs too low for the pigeonhole principle to be incontrovertible. The calculations above assume that in such cases, the mutations all derive from a single sub-clone. However, there is a risk that the mutation burden represents not the burden of a single clone but the sum of the mutation burden for a collection of clones with similar cell fractions across all microbiopsies. This would lead to an over-estimation of the mutation rate for terminal branches of the phylogenetic trees. We performed pruning of the phylogenetic trees, retaining only branches representing nested clusters if the sum of the VAFs was greater than 1. For branches that represent single clusters (with no nesting), we pruned branches with VAF<0.3. 
+
+Unsurprisingly, this lowers the estimation of the total mutation rate. This new value should be thought of as a conservative lower bound. 
+
+```{r}
+## This file can be found in the Mendeley repository accompanying the manuscript. 
+clone_burden_after_pruning <- read.table("/nfs/users/nfs_s/so11/phd/psoriasis/bsub_jupyter_lab/psoriasis/manuscript_data_and_figures/Supplementary_material/clone_mutation_burden_maxVAF03.txt", h=T)
+
+clone_burden <- clone_burden_after_pruning
+clone_burden <- merge(clone_burden, microd_meta[,c("SampleID", "BiopsyID", "MetaLocation","PatientID", "DiseaseStatus")], by.x="HighCellFrac_sample", by.y="SampleID")
+clone_burden <- merge(clone_burden, patient_meta[,c("Patient.ID", "Age_at_sampling", "Disease_duration","Sex")], by.x="PatientID", by.y="Patient.ID")
+
+clone_burden$Disease_duration[clone_burden$DiseaseStatus=="Non-lesional" & !is.na(clone_burden$Disease_duration)] <- 0
+
+clone_burden$noPUVA <- clone_burden$TotalSBS_adj - clone_burden$PUVA
+
+model_noPUVA.null <- lme(fixed = noPUVA ~ Age_at_sampling  + MetaLocation, 
+                      random = list(PatientID = pdSymm(form = ~ Age_at_sampling - 1), BiopsyID = pdSymm(form = ~ Age_at_sampling - 1)), 
+                      weights = varIdent(form= ~ 1 | DiseaseStatus),
+                      data = clone_burden[!is.na(clone_burden$Disease_duration),], method="ML")
+
+model_noPUVA.dur <- lme(fixed = noPUVA ~ Age_at_sampling  + MetaLocation + Disease_duration, 
+                      random = list(PatientID = pdSymm(form = ~ Age_at_sampling - 1), BiopsyID = pdSymm(form = ~ Age_at_sampling - 1)), 
+                      weights = varIdent(form= ~ 1 | DiseaseStatus),
+                      data = clone_burden[!is.na(clone_burden$Disease_duration),], method="ML")
+
+summary(model_noPUVA.null)
+noPUVA.ints <- intervals(model_noPUVA.null, which="fixed")$fixed
+noPUVA.ints
+
+```
+We should look at what effect the pruning of the trees has on the disease duration estimate. We see that the disease duration effect is much diminished and is no longer significant. 
+
+
+```{r}
+
+model_clock.null <- lme(fixed = SBS1.5 ~ Age_at_sampling  + MetaLocation, 
+                      random = list(PatientID = pdSymm(form = ~ Age_at_sampling - 1), BiopsyID = pdSymm(form = ~ Age_at_sampling - 1)), 
+                      weights = varIdent(form= ~ 1 | DiseaseStatus),
+                      data = clone_burden[!is.na(clone_burden$Disease_duration),], method="ML")
+
+model_clock.dur <- lme(fixed = SBS1.5 ~ Age_at_sampling  + MetaLocation + Disease_duration, 
+                      random = list(PatientID = pdSymm(form = ~ Age_at_sampling - 1), BiopsyID = pdSymm(form = ~ Age_at_sampling - 1)), 
+                      weights = varIdent(form= ~ 1 | DiseaseStatus),
+                      data = clone_burden[!is.na(clone_burden$Disease_duration),], method="ML")
+
+summary(model_clock.null)
+summary(model_clock.dur)
+anova(model_clock.null,model_clock.dur, test=T)$"p-value"[2]
+clock.ints <- intervals(model_clock.dur, which="fixed")$fixed
+clock.ints
+summary(model_clock.dur)$tTable[,"p-value"]
+```
+
+
+
